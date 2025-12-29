@@ -8,6 +8,9 @@ from typing import Dict, List, Set
 import pandas as pd
 
 from data.utils import load_movielens_100k, time_split_per_user, binarize_relevance
+from models.popularity import fit as p_fit
+from models.popularity import recommend as p_recommend
+from models.mf import fit, recommend
 from metrics.ndcg import ndcg_at_k, recall_at_k
 from metrics.diversity import coverage_at_k
 
@@ -16,34 +19,34 @@ from metrics.diversity import coverage_at_k
 # Popularity model (baseline)
 # -----------------------------
 
-def fit_popularity(train_df: pd.DataFrame) -> List[int]:
-    """
-    Fits a popularity model by interaction count.
-    Returns items ranked from most → least popular.
-    """
-    pop = (
-        train_df.groupby("item_id")["user_id"]
-        .count()
-        .sort_values(ascending=False)
-    )
-    return pop.index.tolist()
+# def fit_popularity(train_df: pd.DataFrame) -> List[int]:
+#     """
+#     Fits a popularity model by interaction count.
+#     Returns items ranked from most → least popular.
+#     """
+#     pop = (
+#         train_df.groupby("item_id")["user_id"]
+#         .count()
+#         .sort_values(ascending=False)
+#     )
+#     return pop.index.tolist()
 
 
-def recommend_popularity(
-    ranked_items: List[int],
-    seen_items: Set[int],
-    k: int,
-) -> List[int]:
-    """
-    Recommend top-K popular items excluding seen items.
-    """
-    recs = []
-    for item in ranked_items:
-        if item not in seen_items:
-            recs.append(item)
-        if len(recs) == k:
-            break
-    return recs
+# def recommend_popularity(
+#     ranked_items: List[int],
+#     seen_items: Set[int],
+#     k: int,
+# ) -> List[int]:
+#     """
+#     Recommend top-K popular items excluding seen items.
+#     """
+#     recs = []
+#     for item in ranked_items:
+#         if item not in seen_items:
+#             recs.append(item)
+#         if len(recs) == k:
+#             break
+#     return recs
 
 
 # -----------------------------
@@ -72,7 +75,7 @@ def build_relevant_items(test_df: pd.DataFrame) -> Dict[int, Set[int]]:
 def main():
     K = 10
     TEST_RATIO = 0.2
-    THRESHOLD = 4
+    THRESHOLD = 3.5
 
     # 1. Load + split data
     ds = load_movielens_100k(root="data", download=True)
@@ -88,14 +91,15 @@ def main():
     users = sorted(relevant_by_user.keys())
 
     # 3. Train popularity model
-    popular_items = fit_popularity(train)
+    popular_items = fit(train)
 
     # 4. Generate recommendations
     recs_by_user: Dict[int, List[int]] = {}
     for u in users:
-        recs_by_user[u] = recommend_popularity(
-            ranked_items=popular_items,
-            seen_items=seen_by_user[u],
+        recs_by_user[u] = recommend(
+            model=popular_items,
+            user_id=u,
+            exclude_items=seen_by_user[u],
             k=K,
         )
 
