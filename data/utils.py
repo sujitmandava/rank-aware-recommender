@@ -62,13 +62,35 @@ def load_movielens_100k(
         },
     )
 
+    # u.item columns: movie id | title | release date | video release | IMDb URL | genre flags...
+    genre_names = [
+        "unknown",
+        "Action",
+        "Adventure",
+        "Animation",
+        "Children",
+        "Comedy",
+        "Crime",
+        "Documentary",
+        "Drama",
+        "Fantasy",
+        "Film-Noir",
+        "Horror",
+        "Musical",
+        "Mystery",
+        "Romance",
+        "Sci-Fi",
+        "Thriller",
+        "War",
+        "Western",
+    ]
     items = pd.read_csv(
         extract_dir / "u.item",
         sep="|",
         header=None,
         encoding="latin-1",
-        usecols=[0, 1],
-        names=["item_id", "title"],
+        usecols=[0, 1] + list(range(5, 5 + len(genre_names))),
+        names=["item_id", "title"] + genre_names,
         dtype={"item_id": np.int32, "title": str},
     )
 

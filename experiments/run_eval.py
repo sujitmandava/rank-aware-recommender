@@ -8,9 +8,7 @@ from typing import Dict, List, Set
 import pandas as pd
 
 from data.utils import load_movielens_100k, time_split_per_user, binarize_relevance
-from models.popularity import fit as p_fit
-from models.popularity import recommend as p_recommend
-from models.mf import fit, recommend
+from models import content, mf, popularity
 from metrics.ndcg import ndcg_at_k, recall_at_k
 from metrics.diversity import coverage_at_k
 
@@ -90,78 +88,112 @@ def main():
 
     users = sorted(relevant_by_user.keys())
 
-    # 3. Train popularity model
-    popular_items = fit(train)
+    catalog_size = ds.ratings["item_id"].nunique()
 
-    # 4. Generate recommendations
-    recs_by_user: Dict[int, List[int]] = {}
+    def evaluate_and_log(model_name: str, recs_by_user: Dict[int, List[int]]):
+        ndcgs = []
+        recalls = []
+
+        for u in users:
+            ndcgs.append(
+                ndcg_at_k(
+                    recs_by_user[u],
+                    relevant_by_user[u],
+                    k=K,
+                )
+            )
+            recalls.append(
+                recall_at_k(
+                    recs_by_user[u],
+                    relevant_by_user[u],
+                    k=K,
+                )
+            )
+
+        mean_ndcg = sum(ndcgs) / len(ndcgs)
+        mean_recall = sum(recalls) / len(recalls)
+
+        coverage = coverage_at_k(recs_by_user, k=K)
+        coverage_norm = coverage / catalog_size
+
+        print(f"=== {model_name} Evaluation ===")
+        print(f"NDCG@{K}:        {mean_ndcg:.4f}")
+        print(f"Recall@{K}:      {mean_recall:.4f}")
+        print(f"Coverage@{K}:    {coverage} / {catalog_size} = {coverage_norm:.4f}")
+        print()
+
+        log_results = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "model": model_name,
+            "k": K,
+            "test_ratio": TEST_RATIO,
+            "threshold": THRESHOLD,
+            "users_evaluated": len(users),
+            "ndcg": mean_ndcg,
+            "recall": mean_recall,
+            "coverage": coverage,
+            "catalog_size": catalog_size,
+            "coverage_norm": coverage_norm,
+        }
+
+        results_dir = Path("results")
+        results_dir.mkdir(parents=True, exist_ok=True)
+        results_path = results_dir / "experiments.csv"
+        header_needed = not results_path.exists()
+
+        with results_path.open("a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(log_results.keys()))
+            if header_needed:
+                writer.writeheader()
+            writer.writerow(log_results)
+
+    # 3. Train + eval popularity
+    pop_model = popularity.fit(train)
+    pop_recs: Dict[int, List[int]] = {}
     for u in users:
-        recs_by_user[u] = recommend(
-            model=popular_items,
+        pop_recs[u] = popularity.recommend(
+            model=pop_model,
             user_id=u,
             exclude_items=seen_by_user[u],
             k=K,
         )
+    evaluate_and_log("popularity", pop_recs)
 
-    # 5. Compute metrics
-    ndcgs = []
-    recalls = []
-
+    # 4. Train + eval MF (BPR on positives)
+    positives = train[train["relevant"] == 1][["user_id", "item_id"]]
+    mf_model = mf.fit_bpr(
+        positives,
+        k=64,
+        lr=0.05,
+        reg=0.01,
+        epochs=50,
+        n_neg=3,
+        seed=42,
+    )
+    mf_recs: Dict[int, List[int]] = {}
     for u in users:
-        ndcgs.append(
-            ndcg_at_k(
-                recs_by_user[u],
-                relevant_by_user[u],
-                k=K,
-            )
+        mf_recs[u] = mf.recommend(
+            model=mf_model,
+            user_id=u,
+            exclude_items=seen_by_user[u],
+            k=K,
         )
-        recalls.append(
-            recall_at_k(
-                recs_by_user[u],
-                relevant_by_user[u],
-                k=K,
-            )
+    evaluate_and_log("mf_bpr", mf_recs)
+
+    # 5. Train + eval content-based (genre features)
+    content_model = content.fit(
+        train_df=train,
+        items_df=ds.items,
+    )
+    content_recs: Dict[int, List[int]] = {}
+    for u in users:
+        content_recs[u] = content.recommend(
+            model=content_model,
+            user_id=u,
+            exclude_items=seen_by_user[u],
+            k=K,
         )
-
-    mean_ndcg = sum(ndcgs) / len(ndcgs)
-    mean_recall = sum(recalls) / len(recalls)
-
-    coverage = coverage_at_k(recs_by_user, k=K)
-    catalog_size = ds.ratings["item_id"].nunique()
-    coverage_norm = coverage / catalog_size
-
-    # 6. Report
-    print("=== Popularity Baseline Evaluation ===")
-    print(f"NDCG@{K}:        {mean_ndcg:.4f}")
-    print(f"Recall@{K}:      {mean_recall:.4f}")
-    print(f"Coverage@{K}:    {coverage} / {catalog_size} = {coverage_norm:.4f}")
-
-    log_results = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "model": "popularity",
-        "k": K,
-        "test_ratio": TEST_RATIO,
-        "threshold": THRESHOLD,
-        "users_evaluated": len(users),
-        "ndcg": mean_ndcg,
-        "recall": mean_recall,
-        "coverage": coverage,
-        "catalog_size": catalog_size,
-        "coverage_norm": coverage_norm,
-    }
-
-    results_dir = Path("results")
-    results_dir.mkdir(parents=True, exist_ok=True)
-    results_path = results_dir / "experiments.csv"
-    header_needed = not results_path.exists()
-
-    with results_path.open("a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(log_results.keys()))
-        if header_needed:
-            writer.writeheader()
-        writer.writerow(log_results)
-
-    print(f"\nLogged run to {results_path}")
+    evaluate_and_log("content", content_recs)
 
 
 if __name__ == "__main__":
