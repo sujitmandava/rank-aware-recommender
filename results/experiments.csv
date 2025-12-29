@@ -1,0 +1,2 @@
+timestamp,model,k,test_ratio,threshold,users_evaluated,ndcg,recall,coverage,catalog_size,coverage_norm
+2025-12-29T01:00:52.612540,popularity,10,0.2,4,907,0.09916207764458991,0.08074132934496304,72,1682,0.04280618311533888
