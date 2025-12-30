@@ -3,10 +3,11 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 import csv
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Optional
 
 import pandas as pd
 
+from rerank.mmr import build_item_vectors_from_genres, mmr_rerank, rank_based_relevance
 from data.utils import load_movielens_100k, time_split_per_user, binarize_relevance
 from models import content, mf, popularity
 from metrics.ndcg import ndcg_at_k, recall_at_k
@@ -72,6 +73,8 @@ def build_relevant_items(test_df: pd.DataFrame) -> Dict[int, Set[int]]:
 
 def main():
     K = 10
+    CANDIDATES = 200
+    LAMBDA = 0.7
     TEST_RATIO = 0.2
     THRESHOLD = 3.5
 
@@ -89,8 +92,13 @@ def main():
     users = sorted(relevant_by_user.keys())
 
     catalog_size = ds.ratings["item_id"].nunique()
+    item_vectors = build_item_vectors_from_genres(ds.items)
 
-    def evaluate_and_log(model_name: str, recs_by_user: Dict[int, List[int]]):
+    def evaluate_and_log(
+        model_name: str,
+        recs_by_user: Dict[int, List[int]],
+        extra: Optional[Dict[str, float]] = None,
+    ):
         ndcgs = []
         recalls = []
 
@@ -126,6 +134,8 @@ def main():
             "timestamp": datetime.utcnow().isoformat(),
             "model": model_name,
             "k": K,
+            "candidates": CANDIDATES,
+            "lambda": LAMBDA if "mmr" in model_name else None,
             "test_ratio": TEST_RATIO,
             "threshold": THRESHOLD,
             "users_evaluated": len(users),
@@ -135,6 +145,8 @@ def main():
             "catalog_size": catalog_size,
             "coverage_norm": coverage_norm,
         }
+        if extra:
+            log_results.update(extra)
 
         results_dir = Path("results")
         results_dir.mkdir(parents=True, exist_ok=True)
@@ -150,14 +162,25 @@ def main():
     # 3. Train + eval popularity
     pop_model = popularity.fit(train)
     pop_recs: Dict[int, List[int]] = {}
+    pop_mmr_recs: Dict[int, List[int]] = {}
     for u in users:
-        pop_recs[u] = popularity.recommend(
+        pop_candidates = popularity.recommend(
             model=pop_model,
             user_id=u,
             exclude_items=seen_by_user[u],
+            k=CANDIDATES,
+        )
+        pop_recs[u] = pop_candidates[:K]
+        rel_scores = rank_based_relevance(pop_candidates)
+        pop_mmr_recs[u] = mmr_rerank(
+            candidates=pop_candidates,
+            relevance_scores=rel_scores,
+            item_vectors=item_vectors,
             k=K,
+            lambda_relevance=LAMBDA,
         )
     evaluate_and_log("popularity", pop_recs)
+    evaluate_and_log("popularity_mmr", pop_mmr_recs)
 
     # 4. Train + eval MF (BPR on positives)
     positives = train[train["relevant"] == 1][["user_id", "item_id"]]
@@ -171,14 +194,25 @@ def main():
         seed=42,
     )
     mf_recs: Dict[int, List[int]] = {}
+    mf_mmr_recs: Dict[int, List[int]] = {}
     for u in users:
-        mf_recs[u] = mf.recommend(
+        mf_candidates = mf.recommend(
             model=mf_model,
             user_id=u,
             exclude_items=seen_by_user[u],
+            k=CANDIDATES,
+        )
+        mf_recs[u] = mf_candidates[:K]
+        rel_scores = rank_based_relevance(mf_candidates)
+        mf_mmr_recs[u] = mmr_rerank(
+            candidates=mf_candidates,
+            relevance_scores=rel_scores,
+            item_vectors=item_vectors,
             k=K,
+            lambda_relevance=LAMBDA,
         )
     evaluate_and_log("mf_bpr", mf_recs)
+    evaluate_and_log("mf_bpr_mmr", mf_mmr_recs)
 
     # 5. Train + eval content-based (genre features)
     content_model = content.fit(
@@ -186,14 +220,25 @@ def main():
         items_df=ds.items,
     )
     content_recs: Dict[int, List[int]] = {}
+    content_mmr_recs: Dict[int, List[int]] = {}
     for u in users:
-        content_recs[u] = content.recommend(
+        content_candidates = content.recommend(
             model=content_model,
             user_id=u,
             exclude_items=seen_by_user[u],
+            k=CANDIDATES,
+        )
+        content_recs[u] = content_candidates[:K]
+        rel_scores = rank_based_relevance(content_candidates)
+        content_mmr_recs[u] = mmr_rerank(
+            candidates=content_candidates,
+            relevance_scores=rel_scores,
+            item_vectors=item_vectors,
             k=K,
+            lambda_relevance=LAMBDA,
         )
     evaluate_and_log("content", content_recs)
+    evaluate_and_log("content_mmr", content_mmr_recs)
 
 
 if __name__ == "__main__":
